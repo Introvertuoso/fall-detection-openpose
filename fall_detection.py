@@ -10,10 +10,15 @@ import argparse
 
 import numpy as np
 
-critical_speed = 0.09  # m/s
+critical_speed = 0.09  # m/s (0.09 originally)
 critical_angle = 45  # degrees
 critical_ratio = 1.0  # w/h
 small_number = 0.000001
+average_human_height = 166  # m
+torso_to_height_ratio = 38.34 / 100
+speed_value_tweak = 10  # Speed values Tweak
+meter_value_tweak = 2  # Displacement in meters normalization
+height_value_tweak = 100  # Height in pixels normalization
 
 
 # Setting OpenPose parameters
@@ -21,20 +26,34 @@ def set_params():
     params = dict()
     params["model_folder"] = "../../../models/"
     params["disable_blending"] = True
+    # params["render_threshold"] = 0.5
     # params["logging_level"] = 3
     # params["output_resolution"] = "-1x-1"
     # params["net_resolution"] = "-1x368"
-    # params["model_pose"] = "BODY_25"
     # params["alpha_pose"] = 0.6
     # params["scale_gap"] = 0.3
     # params["scale_number"] = 1
-    # params["render_threshold"] = 0.05
-    # # If GPU version is built, and multiple GPUs are available, set the ID here
-    # params["num_gpu_start"] = 0
-    # params["disable_blending"] = False
-    # # Ensure you point to the correct path where models are located
-    # params["default_model_folder"] = dir_path + "/../../../models/"
     return params
+
+
+def euclidean_distance(neck, center):
+    point1 = np.array((neck[0], neck[1]))
+    point2 = np.array((center[0], center[1]))
+    val = np.sum(np.square(point1 - point2))
+    return val
+
+
+# Based on the measurements of Vitrivius later continued by DaVinci
+def height_in_pixels_estimator(neck, center):
+    val = euclidean_distance(neck, center) / torso_to_height_ratio
+    val = val / height_value_tweak  # To tone down the numbers
+    return val
+
+
+def pixel_to_meter_converter(pixel_displacement, neck, center):
+    val = (average_human_height * pixel_displacement) / height_in_pixels_estimator(neck, center)
+    val = val / meter_value_tweak  # To tone down the numbers
+    return val
 
 
 # Checks if the pose estimators are able to pinpoint the joint/keypoint in question.
@@ -53,20 +72,19 @@ def are_keypoints_valid(person):
         return False
 
 
-def speed(old_center, old_time, new_center, new_time):
+def speed(old_center, old_time, new_center, new_time, neck):
     velocity = -1
 
-    # TODO: Tweak this
-    return 0.095
-
     delta_time = new_time - old_time
-    velocity = abs(old_center[1] - new_center[1]) / delta_time
-
-    return [velocity]
+    displacement_in_pixels = abs(old_center[1] - new_center[1])
+    displacement_in_meters = pixel_to_meter_converter(displacement_in_pixels, neck, new_center)
+    velocity = displacement_in_meters / delta_time
+    velocity = velocity / speed_value_tweak  # To tone down the numbers
+    return velocity
 
 
 def angle(head, center):
-    return np.arctan(abs( (head[1]-center[1])/(head[0]-center[0]) ))
+    return np.arctan(abs((head[1] - center[1]) / (head[0] - center[0])))
 
 
 def ratio(head, r_knee, l_knee):
@@ -79,36 +97,28 @@ def ratio(head, r_knee, l_knee):
 
 
 def fall_detection_approach_1(old_keypoints, old_time, new_keypoints, new_time):
-    if old_keypoints is not None and new_keypoints is not None:
-        for old_person, new_person in zip(old_keypoints, new_keypoints):
-            if not are_keypoints_valid(new_person) or not are_keypoints_valid(old_person):
-                continue
+    if not are_keypoints_valid(new_keypoints) or not are_keypoints_valid(old_keypoints):
+        return False
 
-            new_head, new_neck, new_center, new_r_knee, new_l_knee = \
-                new_person[0], new_person[1], new_person[8], new_person[10], new_person[13]
-            old_head, old_neck, old_center, old_r_knee, old_l_knee = \
-                old_person[0], old_person[1], old_person[8], old_person[10], old_person[13]
+    new_head, new_neck, new_center, new_r_knee, new_l_knee = \
+        new_person[0], new_person[1], new_person[8], new_person[10], new_person[13]
+    old_head, old_neck, old_center, old_r_knee, old_l_knee = \
+        old_person[0], old_person[1], old_person[8], old_person[10], old_person[13]
 
-            old_angle = angle(old_head, old_center)
-            old_ratio = ratio(old_head, old_r_knee, old_l_knee)
+    old_angle = angle(old_head, old_center)
+    old_ratio = ratio(old_head, old_r_knee, old_l_knee)
 
-            curr_speed = speed(old_center, old_time, new_center, new_time)
-            curr_angle = angle(new_head, new_center)
-            curr_ratio = ratio(new_head, new_r_knee, new_l_knee)
+    curr_speed = speed(old_center, old_time, new_center, new_time, new_neck)
+    curr_angle = angle(new_head, new_center)
+    curr_ratio = ratio(new_head, new_r_knee, new_l_knee)
 
-            # and curr_angle < old_angle:
-            # and curr_ratio > old_ratio \
-            if curr_speed >= critical_speed \
-                    and \
-                    curr_angle < critical_angle \
-                    and \
-                    curr_ratio >= critical_ratio:
-
-                print("A Fall was detected...")
-                return True
-            else:
-                return False
-
+    if curr_speed >= critical_speed \
+            and \
+            curr_angle < critical_angle and curr_angle <= old_angle \
+            and \
+            curr_ratio >= critical_ratio and curr_ratio >= old_ratio:
+        print(curr_speed)
+        return True
     else:
         return False
 
@@ -171,14 +181,19 @@ try:
     opWrapper.start()
 
     stream = cv2.VideoCapture(0)
+    # stream = cv2.VideoCapture("..\\media\\F01_Trim.mp4")
     if stream.isOpened() is False:
         print("Error opening video stream or file")
     font = cv2.FONT_HERSHEY_SIMPLEX
     o_keypoints = None
     o_time = time.time()
+    prev_frame_time = 0
+    new_frame_time = 0
 
     while True:
         ret, img = stream.read()
+        if not ret:
+            break
 
         # Obtains each frame from the stream and passes it onto the pose estimators
         datum = op.Datum()
@@ -190,12 +205,23 @@ try:
 
         n_time = time.time()
         n_keypoints = datum.poseKeypoints
-        fall_detection_approach_1(o_keypoints, o_time, n_keypoints, n_time)
+        if o_keypoints is not None and n_keypoints is not None:
+            for old_person, new_person in zip(o_keypoints, n_keypoints):
+                if fall_detection_approach_1(old_person, o_time, new_person, n_time):
+                    print("A Fall was detected...")
         o_keypoints = n_keypoints
-        o_time = n_time
+        new_frame_time = n_time
+
+        frame = datum.cvOutputData
+        new_frame_time = time.time()
+        fps = 1 / (new_frame_time - prev_frame_time)
+        prev_frame_time = new_frame_time
+        fps = int(fps)
+        fps = str(fps)
+        cv2.putText(frame, fps, (7, 70), font, 3, (100, 255, 0), 3, cv2.LINE_AA)
 
         # Outputs the stream with the keypoints highlighted
-        cv2.imshow('Fall Detection', datum.cvOutputData)
+        cv2.imshow('Fall Detection', frame)
 
         # Exits stream windows
         key = cv2.waitKey(1)
