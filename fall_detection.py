@@ -10,49 +10,80 @@ import argparse
 
 import numpy as np
 
+# TODO: Make a trailer where 2 fight 1 shoots other falls and gun is abandoned with a fire somewhere
+# TODO: Multiple people lead to wrong center keypoint association
+#           ~get_corresponding_old_keypoints() should fix this (not ultimately)
+# TODO: Include the FPS in the threshold to go up for low threshold
+#           ~Nevermind this may be due to different resolution and not FPS (Investigate)
+#           ~As such, we need to normalize the distance and go from there
+#           ~multiplying speed_value_tweak with input_rate/output_rate
+#           ~this way better systems are compensated less as apposed to slower systems (ideally 1:1)
+#           ~meaning <30ms to process the frame with 30fps cam and half that for 60fps cam and so on...
+# TODO: There should be a state machine of some sort to wait for the subject to get up
+#           ~we keep track of: centers(to not mix up) + fall_time_stamp
+# TODO: Implement the 2nd approach
+
+# TODO: I need to know the FRAME RATE the cam is recording at (PARAMETER FOR PROGRAM)
+
+cam_frame_rate = 30  # My phone's (should be input as a program parameter)
 critical_speed = 0.09  # m/s (0.09 originally)
 critical_angle = 45  # degrees
 critical_ratio = 1.0  # w/h
 small_number = 0.000001
 average_human_height = 166  # m
 torso_to_height_ratio = 38.34 / 100
-speed_value_tweak = 10  # Speed values Tweak
+speed_value_tweak = 7  # Speed values Tweak
 meter_value_tweak = 2  # Displacement in meters normalization
 height_value_tweak = 100  # Height in pixels normalization
+critical_speed = critical_speed * speed_value_tweak
 
 
-# Setting OpenPose parameters
+# Setting OpenPose parameters-
 def set_params():
     params = dict()
     params["model_folder"] = "../../../models/"
     params["disable_blending"] = True
+    params["net_resolution"] = "-1x256"
     # params["render_threshold"] = 0.5
     # params["logging_level"] = 3
     # params["output_resolution"] = "-1x-1"
-    # params["net_resolution"] = "-1x368"
     # params["alpha_pose"] = 0.6
     # params["scale_gap"] = 0.3
     # params["scale_number"] = 1
     return params
 
 
+def get_corresponding_old_keypoints(person, old_keypoints):
+    # Ideally minDistance should be equal to len of screen diagonal (W x H)
+    # So that should be input as well or set statically
+    result = None
+    minDistance = (1080 * 1920) + 1
+    for ok in old_keypoints:
+        distance = euclidean_distance(ok[8], person[8])
+        if distance < minDistance:
+            minDistance = distance
+            result = ok
+
+    return result
+
+
 def euclidean_distance(neck, center):
     point1 = np.array((neck[0], neck[1]))
     point2 = np.array((center[0], center[1]))
-    val = np.sum(np.square(point1 - point2))
+    val = ((((center[0] - neck[0] )**2) + (( center[1] - neck[1] )**2) )**0.5)
     return val
 
 
 # Based on the measurements of Vitrivius later continued by DaVinci
 def height_in_pixels_estimator(neck, center):
     val = euclidean_distance(neck, center) / torso_to_height_ratio
-    val = val / height_value_tweak  # To tone down the numbers
+    # val = val / height_value_tweak  # To tone down the numbers
     return val
 
 
 def pixel_to_meter_converter(pixel_displacement, neck, center):
     val = (average_human_height * pixel_displacement) / height_in_pixels_estimator(neck, center)
-    val = val / meter_value_tweak  # To tone down the numbers
+    # val = val / meter_value_tweak  # To tone down the numbers
     return val
 
 
@@ -79,7 +110,7 @@ def speed(old_center, old_time, new_center, new_time, neck):
     displacement_in_pixels = abs(old_center[1] - new_center[1])
     displacement_in_meters = pixel_to_meter_converter(displacement_in_pixels, neck, new_center)
     velocity = displacement_in_meters / delta_time
-    velocity = velocity / speed_value_tweak  # To tone down the numbers
+    # velocity = velocity / speed_value_tweak  # To tone down the numbers
     return velocity
 
 
@@ -121,6 +152,10 @@ def fall_detection_approach_1(old_keypoints, old_time, new_keypoints, new_time):
         return True
     else:
         return False
+
+
+def fall_detection_approach_2():
+
 
 
 try:
@@ -204,9 +239,11 @@ try:
         # print("Body keypoints: \n" + str(datum.poseKeypoints))
 
         n_time = time.time()
+        print(n_time)
         n_keypoints = datum.poseKeypoints
         if o_keypoints is not None and n_keypoints is not None:
             for old_person, new_person in zip(o_keypoints, n_keypoints):
+                old_person = get_corresponding_old_keypoints(new_person, o_keypoints)
                 if fall_detection_approach_1(old_person, o_time, new_person, n_time):
                     print("A Fall was detected...")
         o_keypoints = n_keypoints
