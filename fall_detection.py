@@ -22,20 +22,28 @@ import numpy as np
 # TODO: There should be a state machine of some sort to wait for the subject to get up
 #           ~we keep track of: centers(to not mix up) + fall_time_stamp
 # TODO: Implement the 2nd approach
+#           ~In the second approach function, requires a buffer and a step size
 
 # TODO: I need to know the FRAME RATE the cam is recording at (PARAMETER FOR PROGRAM)
+# TODO: Transition into a buffer based system for approach 1
 
+path_to_fall_dataset = ""
 cam_frame_rate = 30  # My phone's (should be input as a program parameter)
-critical_speed = 0.09  # m/s (0.09 originally)
-critical_angle = 45  # degrees
-critical_ratio = 1.0  # w/h
-small_number = 0.000001
-average_human_height = 166  # m
+critical_speed = 0.09  # in m/s (0.09 originally)
+critical_angle = 45  # in degrees
+critical_ratio = 1.0  # Width / Height
+small_number = 0.000001  # A small number, so that we dont divide by 0 (not used)
+average_human_height = 166  # in meters
 torso_to_height_ratio = 38.34 / 100
 speed_value_tweak = 7  # Speed values Tweak
 meter_value_tweak = 2  # Displacement in meters normalization
 height_value_tweak = 100  # Height in pixels normalization
-critical_speed = critical_speed * speed_value_tweak
+frames_elapsed = 0  # general processed frame counter
+buffer = []  # processed frames buffer, in other words, list of keypoint lists (per Person)
+confidence_threshold = 0.5  # The threshold above which is the regression output considered a fall.
+buffer_size = 10  # the amount of samples
+step_size = 5  # buffer_size divided by step_size should be allowed with no remainder
+# Perhaps above should be processed_frames_per_second instead and the buffer size is double or triple that
 
 
 # Setting OpenPose parameters-
@@ -70,7 +78,7 @@ def get_corresponding_old_keypoints(person, old_keypoints):
 def euclidean_distance(neck, center):
     point1 = np.array((neck[0], neck[1]))
     point2 = np.array((center[0], center[1]))
-    val = ((((center[0] - neck[0] )**2) + (( center[1] - neck[1] )**2) )**0.5)
+    val = ((((center[0] - neck[0]) ** 2) + ((center[1] - neck[1]) ** 2)) ** 0.5)
     return val
 
 
@@ -97,7 +105,6 @@ def are_keypoints_valid(person):
     l_knee_x, l_knee_y = person[13][0], person[13][1]
     if 0 not in (head_x, neck_x, center_x, r_knee_x, l_knee_x,
                  head_y, neck_y, center_y, r_knee_y, l_knee_y):
-        # print("A set of keypoints was found...")
         return True
     else:
         return False
@@ -126,15 +133,27 @@ def ratio(head, r_knee, l_knee):
 
     return (max_x - min_x) / (max_y - min_y)
 
+def classify_feature_sequence(features, weights=None):
+    # model = logisticRegression()
+
+    if weights is None:
+        # use the path and train the model
+        model = 1
+    else:
+        # model.loadWeights(weights)
+        model = 1
+
+    return model.classify(features)
+
 
 def fall_detection_approach_1(old_keypoints, old_time, new_keypoints, new_time):
     if not are_keypoints_valid(new_keypoints) or not are_keypoints_valid(old_keypoints):
         return False
 
     new_head, new_neck, new_center, new_r_knee, new_l_knee = \
-        new_person[0], new_person[1], new_person[8], new_person[10], new_person[13]
+        new_keypoints[0], new_keypoints[1], new_keypoints[8], new_keypoints[10], new_keypoints[13]
     old_head, old_neck, old_center, old_r_knee, old_l_knee = \
-        old_person[0], old_person[1], old_person[8], old_person[10], old_person[13]
+        old_keypoints[0], old_keypoints[1], old_keypoints[8], old_keypoints[10], old_keypoints[13]
 
     old_angle = angle(old_head, old_center)
     old_ratio = ratio(old_head, old_r_knee, old_l_knee)
@@ -154,8 +173,25 @@ def fall_detection_approach_1(old_keypoints, old_time, new_keypoints, new_time):
         return False
 
 
-def fall_detection_approach_2():
+def fall_detection_approach_2(training=True):
+    result = -1
 
+    if frames_elapsed % step_size == 0 and len(buffer) == buffer_size:
+        model = 1
+    #     Create map,
+        Map = 1
+    #     Calculate rotation energy vector,
+        E = Map / 1
+    #     Calculate generalized force vector,
+        Q = Map / 1
+    #     Concatenate vectors for feature sequence
+        features = E + Q
+        result = classify_feature_sequence(features)
+
+    if result > confidence_threshold:
+        return True
+    else:
+        return False
 
 
 try:
@@ -189,6 +225,7 @@ try:
 
     # Custom Params (refer to include/openpose/flags.hpp for more parameters)
     params = set_params()
+    critical_speed = critical_speed * speed_value_tweak
 
     # Add others in path?
     for i in range(0, len(args[1])):
@@ -239,13 +276,27 @@ try:
         # print("Body keypoints: \n" + str(datum.poseKeypoints))
 
         n_time = time.time()
-        print(n_time)
         n_keypoints = datum.poseKeypoints
-        if o_keypoints is not None and n_keypoints is not None:
-            for old_person, new_person in zip(o_keypoints, n_keypoints):
-                old_person = get_corresponding_old_keypoints(new_person, o_keypoints)
-                if fall_detection_approach_1(old_person, o_time, new_person, n_time):
-                    print("A Fall was detected...")
+
+        frames_elapsed += 1
+
+        # Approach 1
+        # if o_keypoints is not None and n_keypoints is not None:
+        #     for old_person, new_person in zip(o_keypoints, n_keypoints):
+        #         old_person = get_corresponding_old_keypoints(new_person, o_keypoints)
+        #         if fall_detection_approach_1(old_person, o_time, new_person, n_time):
+        #             print("A Fall was detected...")
+
+        # Approach 2
+        if n_keypoints is not None and o_keypoints is not None:
+            if not are_keypoints_valid(n_keypoints):
+                n_keypoints = o_keypoints
+            if len(buffer) == buffer_size:
+                buffer.pop(0)
+            buffer.append(n_keypoints)
+            if fall_detection_approach_2():
+                print("A Fall was detected...")
+
         o_keypoints = n_keypoints
         new_frame_time = n_time
 
